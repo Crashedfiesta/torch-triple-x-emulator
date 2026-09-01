@@ -2,12 +2,6 @@
 
 An emulator for the Torch Triple X workstation.
 
-Original code by Kokoboi.
-
-Endlessly messed about with by Crashedfiesta.
-
-28/08/26 - First proper issue of code and README.
-
 ## Current status
 
 - Boots the Torch Caretaker ROM (v1.2 and v1.3 tested)
@@ -65,7 +59,8 @@ Crashes at startup also occur more than you'd expect:
 
 ## Credits
 
-Original code by Kokoboi
-Fiddled with by Crashedfiesta
+Original code by Kokoboi.
+
+Endlessly fiddled with by Crashedfiesta (special thanks to Kokoboi for allowing me to do this).
 
 This just would not work without the amazing Musashi 68k CPU emulator.
