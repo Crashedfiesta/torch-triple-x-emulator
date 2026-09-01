@@ -55,11 +55,13 @@ Instructions for tap0 - coming soon.
 ## Known limitations
 
 Crashes within Unix are quite common. Suspect it could be MMU related but I don't know enough about the MMU.. Be prepared!
-Crashed are startup also occur more than you'd expect:
-  Stuck on dark blue 'Caretaker' screen - close triplex and try again
-  Stuck on pale blue screen - close triplex and try again
-  Stuck on booting OpenTop (normally the top border of a window is all that is visible) - close triplex and start again
-  'Error on read' message - click 'OK' or '=' on the window until the three boot icons appear. Click on the boot and press enter to err... boot.
+
+Crashes at startup also occur more than you'd expect:
+
+- Stuck on dark blue 'Caretaker' screen - close triplex and try again
+- Stuck on pale blue screen - close triplex and try again
+- Stuck on booting OpenTop (normally the top border of a window is all that is visible) - close triplex and start again
+- 'Error on read' message - click 'OK' or '=' on the window until the three boot icons appear. Click on the boot and press enter to err... boot.
 
 ## Credits
 
