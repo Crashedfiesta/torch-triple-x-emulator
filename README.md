@@ -24,7 +24,7 @@ Endlessly messed about with by Crashedfiesta.
 - C compiler
 - SDL2 development libraries
 - Musashi 68000 emulator
-- Appropriate Torch ROM image
+- Appropriate Torch ROM and key disk image
 - Torch Unix hard disk image
 
 ## Building on Linux
