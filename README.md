@@ -39,7 +39,7 @@ Note that the code should compile in Windows but there is no Windows network sup
 
 Execute 'triplex' from a terminal window. The following options are available:
 
- - --disk           the hard disk image to use (SCSI ID 0 LUN 0)
+ - --disk           ##the hard disk image to use (SCSI ID 0 LUN 0)
  - --unix-floppy    the regular floppy disk image to use
  - --key-disk       the 'key disk' image to use - note this must be in .imd format
  - --sdl            use the SDL library to construct the required windows
