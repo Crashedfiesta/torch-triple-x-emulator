@@ -2,6 +2,10 @@
 
 An emulator for the Torch Triple X workstation.
 
+This project includes a modified copy of Musashi 4.60 as the Motorola 680x0 CPU emulation core. 
+The Musashi sources have been adapted for the Torch Triple X emulator, particularly around MMU and bus-error handling. 
+The original Musashi copyright and licence notices are retained in the source files.
+
 ## Current status
 
 - Boots the Torch Caretaker ROM (v1.2 and v1.3 tested)
@@ -23,24 +27,34 @@ An emulator for the Torch Triple X workstation.
 
 ## Building on Linux
 
-Ensure that 3rd party libraries are in place and in the case of 'musashi' are in a folder called 'third_party'.
+Ensure that 3rd party libraries are in place, including the Torch specific Musashi code.
 
 To make 'triplex' run 'make'.
 
 To remove 'triplex' run 'make clean'.
 
-Note that it will compile in Windows but there is no network support (yet).
+Note that the code should compile in Windows but there is no Windows network support (yet).
 
 ## Running
 
-Execute from a terminal window:
+Execute 'triplex' from a terminal window. The following options are available:
+
+ - --disk           the hard disk image to use (SCSI ID 0 LUN 0)
+ - --unix-floppy    the regular floppy disk image to use
+ - --key-disk       the 'key disk' image to use - note this must be in .imd format
+ - --sdl            use the SDL library to construct the required windows
+ - --host           create windows on the host system (without this, you won't see much!)
+ - --scale          the scale of the window to use - '1' works best
+ - --tap            the 'tap' interface that the emulator connects to when talking through the LANCE chips
+
+For example:
 
 ./triplex --disk HD00.img --unix-floppy FloppyDisk.img --keydisk torch_KEY.imd --sdl --host --scale 1 --tap tap0
 
 ## ROMs and disk images
 
 ROM and operating-system images are not supplied with this repository.
-Users must provide their own legally obtained copies.
+Users must provide their own legally obtained copies. ;)
 
 ## Networking
 
@@ -63,4 +77,4 @@ Original code by Kokoboi.
 
 Endlessly fiddled with by Crashedfiesta (special thanks to Kokoboi for allowing me to do this).
 
-This just would not work without the amazing Musashi 68k CPU emulator.
+This project makes extensive use of the Musashi project.
