@@ -21,7 +21,7 @@ The original Musashi copyright and licence notices are retained in the source fi
 
 - C compiler
 - SDL2 development libraries
-- Musashi 68000 emulator
+- Torch specific Musashi 68000 emulator (included in this project)
 - Appropriate Torch ROM and key disk image
 - Torch Unix hard disk image
 
@@ -53,8 +53,8 @@ For example:
 
 ## ROMs and disk images
 
-ROM and operating-system images are not supplied with this repository.
-Users must provide their own legally obtained copies. ;)
+ROM, Key Disk and operating system images are not supplied with this repository.
+Users must provide their own legally obtained copies.
 
 ## Networking
 
