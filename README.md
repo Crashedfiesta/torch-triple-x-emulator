@@ -39,13 +39,13 @@ Note that the code should compile in Windows but there is no Windows network sup
 
 Execute 'triplex' from a terminal window. The following options are available:
 
- - --disk           ##the hard disk image to use (SCSI ID 0 LUN 0)
- - --unix-floppy    the regular floppy disk image to use
- - --key-disk       the 'key disk' image to use - note this must be in .imd format
- - --sdl            use the SDL library to construct the required windows
- - --host           create windows on the host system (without this, you won't see much!)
- - --scale          the scale of the window to use - '1' works best
- - --tap            the 'tap' interface that the emulator connects to when talking through the LANCE chips
+ - --disk           (the hard disk image to use - uses SCSI ID 0 LUN 0)
+ - --unix-floppy    (the regular floppy disk image to use)
+ - --key-disk       (the 'key disk' image to use - note this must be in .imd format)
+ - --sdl            (use the SDL library to construct the required windows)
+ - --host           (create windows on the host system - without this, you won't see much!)
+ - --scale          (the scale of the window to use - '1' works best)
+ - --tap            (the 'tap' interface that the emulator connects to when talking through the LANCE chips)
 
 For example:
 
