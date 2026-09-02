@@ -10,9 +10,6 @@
 triplex
 triplex.exe
 
-# Third-party dependencies
-third_party/
-
 # Local helper scripts
 startnetwork_ROOT.sh
 starttorch.sh
