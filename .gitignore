@@ -1,0 +1,20 @@
+# Disk images
+*.img
+*.imd
+
+# ROMs and machine-specific data
+*.rom
+*.bin
+
+# Compiled executable
+triplex
+triplex.exe
+
+# Third-party dependencies
+third_party/
+
+# Local helper scripts
+startnetwork_ROOT.sh
+starttorch.sh
+starttorch_ROOT.sh
+torch-network.sh
