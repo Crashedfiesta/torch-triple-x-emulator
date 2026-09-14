@@ -4419,9 +4419,21 @@ static uint32_t host_mem_read(uint32_t addr, int sz) {
             uint16_t w = lance_read16(a & ~1);
             b = (a & 1) ? (uint8_t)(w & 0xFF) : (uint8_t)(w >> 8);
         } else {
-            uint8_t *p = host_ptr(a);
-            b = p ? host_io_read_quirk(a, *p) : 0;
+            if (a == 0x40006) {
+                b = 0x04;   /* Z8530 RR0: transmit buffer empty */
+            } else {
+                uint8_t *p = host_ptr(a);
+                b = p ? host_io_read_quirk(a, *p) : 0;
+            }
         }
+            if (a >= 0x40000 && a < 0x40008) {
+                fprintf(stderr,
+                        "[SCC READ ] PC=%08X addr=%06X -> %02X\n",
+                        (unsigned)m68k_get_reg(NULL, M68K_REG_PC),
+                        (unsigned)a,
+                        (unsigned)b);
+            }
+        
         /* Host reads of the SP<->host VRAM mailboxes (keyboard $1F0, mouse
          * $2F0, SP-command $3F0): does the host ever poll $3F0 to see the
          * SP's command-complete acknowledgement? */
@@ -4546,10 +4558,20 @@ static void host_mem_write(uint32_t addr, uint32_t v, int sz) {
             /* Z8530 SCC at $40000-$40007: log writes to the data registers
              * (odd byte offsets) so the kernel's serial-console output --
              * boot banner, panic messages -- is visible. */
-            if (0 && a >= 0x40000 && a < 0x40008 && (a & 1)) {
+            
+            /*if (0 && a >= 0x40000 && a < 0x40008 && (a & 1)) {
                 uint8_t ch = v & 0xFF;
                 (void)0;
+            }*/
+            if (a >= 0x40000 && a < 0x40008) {
+                fprintf(stderr,
+                        "[SCC WRITE] PC=%08X addr=%06X val=%02X\n",
+                        (unsigned)m68k_get_reg(NULL, M68K_REG_PC),
+                        (unsigned)a,
+                        (unsigned)(v & 0xFF));
             }
+            
+            
             /* Watch host writes to the kbd/mouse mailboxes ($1F0-$1FF /
              * $2F0-$2FF) -- helps confirm whether the host acks/clears
              * the mailbox or whether someone other than the SP is writing
