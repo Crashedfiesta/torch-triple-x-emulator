@@ -51,6 +51,7 @@
 #include <errno.h>
 #include "rtc.h"
 #include "ptm.h"
+#include "acia.h"
 
 
 #ifdef USE_SDL
@@ -116,18 +117,7 @@ static int     g_sci_feed_delay;      /* paces bytes at ~serial rate */
 /* TRCSR ($11) bit assignments (HD6303): TE=$02 TIE=$04 RE=$08 RIE=$10
  * TDRE=$20 ORFE=$40 RDRF=$80. */
 
-/* --- 6850 ACIA (serial mouse) receive state ---
- * The Torch mouse is a serial mouse on an external 6850 ACIA mapped at SP
- * $0200 (status/control) and $0201 (data).  Its /IRQ drives HD6303 /IRQ1
- * ($FFF8 -> ISR $CC4A).  We model the receive side: 3-byte mouse packets
- * injected from SDL get clocked into the data register, set RDRF, and raise
- * IRQ1; the CARETAKER ISR enqueues them into the shared-VRAM mouse mailbox. */
-static uint8_t g_acia_ctrl = 0x55;    /* last value written to control reg */
-static uint8_t g_acia_rdr;            /* received data byte ($0201) */
-static int     g_acia_rdrf;           /* Receive Data Register Full */
-static uint8_t g_mouse_q[256];        /* injected mouse bytes from SDL */
-static int     g_mouse_q_head, g_mouse_q_tail;
-static int     g_acia_feed_delay;     /* paces bytes at ~serial rate */
+
 
 /* Headless input-injection test (--type STR / --mouse): once boot has
  * reached the login prompt, pace synthetic keystrokes and mouse motion
@@ -330,33 +320,6 @@ static void kbd_enqueue(uint8_t code) {
     if (nh == g_kbd_q_tail) return;               /* queue full, drop */
     g_kbd_q[g_kbd_q_head] = code;
     g_kbd_q_head = nh;
-}
-
-/* 6850 status register ($0200 read): bit0 RDRF, bit1 TDRE (always set --
- * transmit never blocks), bit2 DCD=0, bit7 IRQ when RDRF and Rx-IRQ on. */
-static uint8_t acia_status(void) {
-    uint8_t s = 0x02;
-    if (g_acia_rdrf) s |= 0x01;
-    if (g_acia_rdrf && (g_acia_ctrl & 0x80)) s |= 0x80;
-    return s;
-}
-
-/* Clock the next queued mouse byte into the ACIA receive register. */
-static void acia_rx_feed(void) {
-    if (g_acia_feed_delay > 0) { g_acia_feed_delay--; return; }
-    if (g_acia_rdrf) return;                      /* RDR not yet read */
-    if (g_mouse_q_head == g_mouse_q_tail) return; /* queue empty */
-    g_acia_rdr = g_mouse_q[g_mouse_q_tail];
-    g_mouse_q_tail = (g_mouse_q_tail + 1) & 0xFF;
-    g_acia_rdrf = 1;
-    g_acia_feed_delay = 2500;
-    {
-    }
-}
-
-/* IRQ1 pending: RDRF set AND Rx interrupt enabled (control bit 7) AND I clear. */
-static int acia_irq1_pending(void) {
-    return g_acia_rdrf && (g_acia_ctrl & 0x80) && !(cpu.cc & CC_I);
 }
 
 
@@ -589,12 +552,10 @@ static uint8_t mem_read(uint16_t addr) {
     if (addr >= 0x0100 && addr < 0x0108) return ptm_read(addr - 0x0100);
     /* 6850 ACIA (serial mouse) at $0200 (status) / $0201 (data) */
     if (addr == 0x0200) {
-        uint8_t s = acia_status();
-        return s;
+        return acia_status();
     }
     if (addr == 0x0201) {
-        g_acia_rdrf = 0;
-        return g_acia_rdr;
+        return acia_read_data();
     }
     /* HD146818 RTC at $0300-$033F */
     if (addr >= 0x0300 && addr < 0x0340) return rtc_read(addr - 0x0300);
@@ -640,11 +601,13 @@ static void mem_write(uint16_t addr, uint8_t val) {
     if (addr >= 0x0100 && addr < 0x0108) { ptm_write(addr - 0x0100, val); return; }
     /* 6850 ACIA: $0200 = control register, $0201 = transmit data */
     if (addr == 0x0200) {
-        g_acia_ctrl = val;
-        if ((val & 0x03) == 0x03) g_acia_rdrf = 0;   /* master reset */
+        acia_write_control(val); /* master reset */
         return;
     }
-    if (addr == 0x0201) return;                       /* SP->mouse TX, discard */
+    if (addr == 0x0201) {
+        acia_write_data(val);
+        return;  
+    }    
     /* HD146818 RTC */
     if (addr >= 0x0300 && addr < 0x0340) { rtc_write(addr - 0x0300, val); return; }
     /* Palette.  The initial sixteen E0 writes are the Caretaker startup
@@ -4557,8 +4520,11 @@ int main(int argc, char **argv) {
         if (ocf_pending())            cpu_interrupt(0xFFF4);
         else if (tof_pending())       cpu_interrupt(0xFFF2);
         else if (sci_pending())       cpu_interrupt(0xFFF0);
-        else if (acia_irq1_pending() || ptm_irq1_pending())
+
+        else if (!(cpu.cc & CC_I) &&
+                (acia_irq_pending() || ptm_irq1_pending()))
             cpu_interrupt(0xFFF8);
+
 #ifdef USE_M68K
         /* Once SP has reached its main idle loop, snapshot shared RAM into
          * the host's view and start the host CPU. */

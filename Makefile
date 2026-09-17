@@ -9,7 +9,7 @@ MUSASHI_SRCS = $(MUSASHI)/m68kcpu.c $(MUSASHI)/m68kops.c $(MUSASHI)/m68kdasm.c $
 
 all: triplex
 
-triplex: triplex.c rtc.c ptm.c $(MUSASHI_SRCS)
+triplex: triplex.c rtc.c ptm.c acia.c $(MUSASHI_SRCS)
 	$(CC) $(CFLAGS) -o $@ $^ $(INCLUDES) $(LIBS)
 
 clean:
