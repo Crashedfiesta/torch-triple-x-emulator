@@ -52,6 +52,7 @@
 #include "rtc.h"
 #include "ptm.h"
 #include "acia.h"
+#include "hd6303_sci.h"
 
 
 #ifdef USE_SDL
@@ -101,23 +102,6 @@ static uint8_t g_intram[0xC0];
  *   $15-$1F      reserved
  */
 static uint8_t g_io[0x20];
-
-/* --- HD6303 SCI (serial keyboard) receive state ---
- * The Torch keyboard is an external micro on a 4800-baud serial link into
- * the HD6303 on-chip SCI.  We model the receive side only: bytes injected
- * from the SDL key handler queue here, get clocked into RDR ($12) one at a
- * time, set RDRF, and raise the SCI interrupt ($FFF0).  The CARETAKER ISR
- * at $CA82 reads RDR and enqueues into the shared-VRAM keyboard mailbox. */
-static uint8_t g_sci_rdr;             /* Receive Data Register ($12) */
-static int     g_sci_rdrf;            /* Receive Data Register Full */
-static uint8_t g_kbd_q[256];          /* injected scancodes from SDL */
-static int     g_kbd_q_head, g_kbd_q_tail;
-static int     g_sci_feed_delay;      /* paces bytes at ~serial rate */
-
-/* TRCSR ($11) bit assignments (HD6303): TE=$02 TIE=$04 RE=$08 RIE=$10
- * TDRE=$20 ORFE=$40 RDRF=$80. */
-
-
 
 /* Headless input-injection test (--type STR / --mouse): once boot has
  * reached the login prompt, pace synthetic keystrokes and mouse motion
@@ -294,34 +278,6 @@ static int tof_pending(void) {
     return (g_io[0x08] & 0x24) == 0x24 && !(cpu.cc & CC_I);
 }
 
-/* Clock the next queued keyboard byte into the SCI receive register.
- * Paced by g_sci_feed_delay so bytes arrive no faster than the SP's ISR
- * can drain them -- a real 4800-baud byte is ~2ms (~2500 SP cycles). */
-static void sci_rx_feed(void) {
-    if (g_sci_feed_delay > 0) { g_sci_feed_delay--; return; }
-    if (g_sci_rdrf) return;                       /* RDR not yet read */
-    if (g_kbd_q_head == g_kbd_q_tail) return;     /* queue empty */
-    g_sci_rdr = g_kbd_q[g_kbd_q_tail];
-    g_kbd_q_tail = (g_kbd_q_tail + 1) & 0xFF;
-    g_sci_rdrf = 1;
-    g_sci_feed_delay = 2500;
-    {
-    }
-}
-
-/* SCI receive interrupt: RDRF set AND RIE (TRCSR bit 4) set AND I clear. */
-static int sci_pending(void) {
-    return g_sci_rdrf && (g_io[0x11] & 0x10) && !(cpu.cc & CC_I);
-}
-
-/* Push a scancode into the keyboard injection queue (called from SDL). */
-static void kbd_enqueue(uint8_t code) {
-    int nh = (g_kbd_q_head + 1) & 0xFF;
-    if (nh == g_kbd_q_tail) return;               /* queue full, drop */
-    g_kbd_q[g_kbd_q_head] = code;
-    g_kbd_q_head = nh;
-}
-
 
 /* Queue one Torch-mouse packet.  The kernel MoveMouse function at
  * $12A472 (torch2) is a 3-byte stateful collector triggered for each
@@ -365,14 +321,15 @@ static void mouse_packet(int dx, int dy, int left, int right) {
      * (table[0x7F] = 0x1000 falls through to the ASCII path when not
      * already in mouse mode).  That manifests as random characters
      * appearing all over the screen. */
-    int free = (g_kbd_q_tail - g_kbd_q_head - 1) & 0xFF;
-    if (free < 6) return;
-    kbd_enqueue(0x7A);
-    kbd_enqueue(b0);
-    kbd_enqueue(b0);
-    kbd_enqueue(sdx & 0x7F);
-    kbd_enqueue(sdy & 0x7F);
-    kbd_enqueue(0xFF);
+    if (sci_queue_free() < 6)
+        return;
+
+    sci_enqueue(0x7A);
+    sci_enqueue(b0);
+    sci_enqueue(b0);
+    sci_enqueue(sdx & 0x7F);
+    sci_enqueue(sdy & 0x7F);
+    sci_enqueue(0xFF);
 }
 
 /* HD6303R timer register read/write semantics. */
@@ -386,14 +343,13 @@ static uint8_t io_reg_read(uint16_t addr) {
     if (addr == 0x11) {
         /* TRCSR: control bits as written, plus live status -- RDRF from
          * our receive state, TDRE always set (transmit never blocks). */
-        return (g_io[0x11] & 0x1F) | (g_sci_rdrf ? 0x80 : 0x00) | 0x20;
+        /*return (g_io[0x11] & 0x1F) | (g_sci_rdrf ? 0x80 : 0x00) | 0x20;*/
+        return sci_read_trcsr(g_io[0x11]);
     }
     if (addr == 0x12) {
         /* Reading RDR returns the byte and clears RDRF. */
-        {
-        }
-        g_sci_rdrf = 0;
-        return g_sci_rdr;
+        /*g_sci_rdrf = 0; */
+        return sci_read_data();
     }
     return g_io[addr];
 }
@@ -4519,7 +4475,10 @@ int main(int argc, char **argv) {
          * ISR consume mouse bytes even when ACIA Rx IRQ is off. */
         if (ocf_pending())            cpu_interrupt(0xFFF4);
         else if (tof_pending())       cpu_interrupt(0xFFF2);
-        else if (sci_pending())       cpu_interrupt(0xFFF0);
+
+        else if (!(cpu.cc & CC_I) &&
+                sci_irq_pending(g_io[0x11]))
+            cpu_interrupt(0xFFF0);
 
         else if (!(cpu.cc & CC_I) &&
                 (acia_irq_pending() || ptm_irq1_pending()))
@@ -4690,7 +4649,7 @@ int main(int argc, char **argv) {
 					torch_matrix_code(ev.key.keysym.sym);
 
 				if (mc)
-					kbd_enqueue(mc | 0x80);
+					sci_enqueue(mc | 0x80);
 			}
 
                 
@@ -4770,7 +4729,7 @@ int main(int argc, char **argv) {
 					torch_matrix_code(ev.key.keysym.sym);
 
 				if (mc)
-					kbd_enqueue(mc);
+					sci_enqueue(mc);
 			}	
 							
                 else if (ev.type == SDL_MOUSEMOTION) {
@@ -4874,11 +4833,11 @@ int main(int argc, char **argv) {
                         SDL_Keycode k = (cur_c == '\n') ? SDLK_RETURN
                                                        : (SDL_Keycode)(unsigned char)cur_c;
                         cur_mc = torch_matrix_code(k);
-                        if (cur_mc) kbd_enqueue(cur_mc);
+                        if (cur_mc) sci_enqueue(cur_mc);
                         (void)0;
                         half = 1;
                     } else {
-                        if (cur_mc) kbd_enqueue(cur_mc | 0x80);
+                        if (cur_mc) sci_enqueue(cur_mc | 0x80);
                         (void)0;
                         half = 0;
                     }
