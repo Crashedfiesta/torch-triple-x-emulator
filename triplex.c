@@ -53,6 +53,7 @@
 #include "ptm.h"
 #include "acia.h"
 #include "hd6303_sci.h"
+#include "video.h"
 
 
 #ifdef USE_SDL
@@ -60,6 +61,9 @@
 #endif
 #ifdef USE_M68K
 #include "m68k.h"
+#endif
+#ifdef USE_SDL
+static void render_frame(void);
 #endif
 
 #define TRACE_SCSI 0
@@ -150,43 +154,6 @@ static void io_log(const char *op, uint16_t addr, uint8_t val) {
     (void)0;
 }
 
-/* --- Memory access --- */
-/* --- Motorola 6845E CRTC at $0400 (address port) / $0401 (data port) ---
- * 18 registers (0-17).  Writing $0400 selects register; writing/reading
- * $0401 accesses the selected register.  Reading $0400 returns a status:
- *   bit 7 = vertical sync       (we toggle this every ~25K cycles)
- *   bit 6 = light pen latched   (we leave at 0)
- *   bit 5 = update strobe
- *   bits 0-4 = reserved
- */
-static uint8_t g_crtc_regs[18];
-static uint8_t g_crtc_idx = 0;
-static int     g_crtc_cycles = 0;
-static int     g_crtc_in_vsync = 0;
-
-static int g_crtc_update_strobe = 0;
-static int g_crtc_strobe_reads = 0;
-/* On the real 6845E, bit 5 of the status register is the UPDATE STROBE -- it
- * goes low during the active scan period and high during retrace, with a
- * period of one frame.  The firmware uses this for two things:
- *   1. A "CRTC alive" liveness test that just expects bit 5 to ever toggle.
- *   2. A timing test ($C046) that counts how many reads of $0400 happen
- *      before bit 5 changes value, and checks SAMPLE1+SAMPLE3 is in
- *      [$03E8 ... $0515] (decimal 1000-1301).  Each sample ~500-650 reads.
- * We toggle the strobe every 600 reads to keep both tests happy. */
-static uint8_t crtc_status(void) {
-    if (++g_crtc_strobe_reads >= 600) {
-        g_crtc_strobe_reads = 0;
-        g_crtc_update_strobe ^= 1;
-    }
-    return (g_crtc_in_vsync ? 0x80 : 0x00)
-         | (g_crtc_update_strobe ? 0x20 : 0x00);
-}
-
-/* Palette: 16 entries, each one byte.  The physical Triple X palette is
- * formed by the two 74S189 16x4 RAMs shown on schematic page 13. */
-static uint8_t g_palette[16];
-
 /*
  * The real machine has three clearly visible startup phases:
  *
@@ -202,16 +169,6 @@ static uint8_t g_palette[16];
  * active, normal colours are used.  Any later palette write is treated as a
  * genuine software palette change and is rendered literally thereafter.
  */
-typedef enum {
-    VIDEO_DISPLAY_PALE_BLUE = 0,
-    VIDEO_DISPLAY_DARK_BLUE,
-    VIDEO_DISPLAY_NORMAL
-} video_display_state_t;
-
-static video_display_state_t g_video_display_state = VIDEO_DISPLAY_PALE_BLUE;
-static uint16_t g_boot_palette_e0_mask = 0;
-static int g_runtime_palette_enabled = 0;
-static int g_runtime_palette_programmed = 0;
 
 static int g_boot_slow_mode = 0;
 #ifdef USE_SDL
@@ -222,31 +179,35 @@ static Uint32 g_boot_slow_start_ms = 0;
 #define CARETAKER_HOST_DIVISOR 10
 
 static int g_caretaker_host_counter = 0;
-static void video_display_reset(void)
-{
-    g_video_display_state = VIDEO_DISPLAY_PALE_BLUE;
-    g_runtime_palette_enabled = 0;
-    g_runtime_palette_programmed = 0;
-    memset(g_palette, 0, sizeof(g_palette));
-}
 
 static void video_display_host_handover(void)
 {
-    if (g_runtime_palette_enabled)
+
+#ifdef USE_SDL
+    /*
+     * Caretaker has now finished drawing its startup/version screen.
+     * Force one final dark-blue frame to the SDL window and leave it
+     * visible briefly before switching to normal host-driven video.
+     */
+    render_frame();
+    SDL_Delay(600);
+#endif
+
+    if (!video_display_begin_host_mode())
         return;
 
-    g_runtime_palette_enabled = 1;
-    g_runtime_palette_programmed = 0;
-    g_video_display_state = VIDEO_DISPLAY_NORMAL;
-	fprintf(stderr,"[DISPLAY] dark blue (Caretaker startup)-> boot (Regular boot)\n");
+    fprintf(stderr,
+            "[DISPLAY] dark blue (Caretaker startup) -> boot (Regular boot)\n");
 
 #ifdef USE_SDL
     g_boot_slow_mode = 1;
     g_boot_slow_start_ms = SDL_GetTicks();
-    fprintf(stderr, "[BOOT] Caretaker interaction slowdown started\n");
-#endif
 
+    fprintf(stderr,
+            "[BOOT] Caretaker interaction slowdown started\n");
+#endif
 }
+
 
 
 /* HD6303R internal Free-Running Counter (FRC) at $09-$0A.
@@ -389,13 +350,13 @@ static void io_reg_write(uint16_t addr, uint8_t val) {
 	if (addr == 0x02) {
 		uint8_t old = g_io[0x02];
 		if (((old ^ val) & 0x04) != 0) {		
-			if (g_video_display_state == VIDEO_DISPLAY_PALE_BLUE &&
+			if (video_display_is_pale_blue() &&
 				old == 0x16 &&
 				val == 0x12) {
 				fprintf(stderr,
                     "[DISPLAY] pale blue (Initial startup) -> dark blue (Caretaker)\n");
 
-				g_video_display_state = VIDEO_DISPLAY_DARK_BLUE;
+				video_display_set_dark_blue();
 			}	
 			
 		}
@@ -486,9 +447,8 @@ static uint8_t mem_read(uint16_t addr) {
 		}
 	
         if (value == 0x0F &&
-            g_video_display_state == VIDEO_DISPLAY_PALE_BLUE) {
-            g_video_display_state = VIDEO_DISPLAY_DARK_BLUE;
-			/*SDL_Delay(2500);*/
+            video_display_is_pale_blue()) {
+            video_display_set_dark_blue();
         }
 
         if (value == 0x0A) {
@@ -499,10 +459,10 @@ static uint8_t mem_read(uint16_t addr) {
     return value;
 }
     /* CRTC */
-    if (addr == 0x0400) return crtc_status();
+    if (addr == 0x0400)
+        return video_crtc_status();
     if (addr == 0x0401) {
-        uint8_t v = g_crtc_idx < 18 ? g_crtc_regs[g_crtc_idx] : 0;
-        return v;
+        return video_crtc_read_data();
     }
     /* 6840 PTM at $0100-$0107 */
     if (addr >= 0x0100 && addr < 0x0108) return ptm_read(addr - 0x0100);
@@ -518,7 +478,7 @@ static uint8_t mem_read(uint16_t addr) {
     
     /* Palette read-back. */
     if (addr >= 0x0500 && addr < 0x0510)
-        return g_palette[addr & 0x0f];
+        return video_palette_read(addr & 0x0F);
 	
 	
 	/* External area -- everything else through catch-all. */
@@ -548,11 +508,17 @@ static void mem_write(uint16_t addr, uint8_t val) {
         return;
     }
     /* CRTC */
-    if (addr == 0x0400) { g_crtc_idx = val & 0x1F; return; }
-    if (addr == 0x0401) {
-        if (g_crtc_idx < 18) g_crtc_regs[g_crtc_idx] = val;
+
+    if (addr == 0x0400) {
+        video_crtc_select(val);
         return;
     }
+
+    if (addr == 0x0401) {
+        video_crtc_write_data(val);
+        return;
+    }
+    
     /* 6840 PTM */
     if (addr >= 0x0100 && addr < 0x0108) { ptm_write(addr - 0x0100, val); return; }
     /* 6850 ACIA: $0200 = control register, $0201 = transmit data */
@@ -571,30 +537,10 @@ static void mem_write(uint16_t addr, uint8_t val) {
      * pale blue to dark blue.  Once host-driven operation has begun, every
      * palette write is a genuine programmable-palette update. */
     if (addr >= 0x0500 && addr < 0x0510) {
-        unsigned index = addr & 0x0f;
-
-		/*fprintf(stderr,
-			"[RUNTIME PALETTE WRITE] index=%u value=%02X\n",
-			index, val); */
-
-		g_palette[index] = val;
-
-		
-		/*
-		* Always retain the physical palette-RAM write, but do not let the
-		* initial E0 initialisation expose the contents of VRAM.
-		*
-		* The early framebuffer contains intermediate data while the service
-		* processor prepares Caretaker/WERMA.  The real machine masks this with
-		* the uniform pale-blue display.
-		*/
-		if (g_runtime_palette_enabled) {
-			g_runtime_palette_programmed = 1;
-			g_video_display_state = VIDEO_DISPLAY_NORMAL;
-		}
-				
+        video_palette_write(addr & 0x0F, val);
         return;
     }
+        
     g_ram[addr] = val;
     io_log("W", addr, val);
 }
@@ -4057,13 +4003,13 @@ static void host_sync_from_sp(void) {}
  * x_count*2 = 180 bytes from VRAM, each byte expands to 8 pixels (in
  * mode 2 / 1bpp), giving 1440 displayed pixels per scanline.  We render
  * 256 lines (one CRT field; the second interlaced field reads the same
- * data so it's a repeat). */
-#define FB_W 720
-#define FB_H 256
+ * data so it's a repeat) */
+ 
+
 static SDL_Window   *g_win  = NULL;
 static SDL_Renderer *g_ren  = NULL;
 static SDL_Texture  *g_tex  = NULL;
-static uint32_t      g_fb[FB_W * FB_H];
+static uint32_t      g_fb[VIDEO_FB_WIDTH * VIDEO_FB_HEIGHT];
 
 static int sdl_init(int scale) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -4071,15 +4017,15 @@ static int sdl_init(int scale) {
     }
     g_win = SDL_CreateWindow("Torch Triple X",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        FB_W * scale, FB_H * scale * 2, 0);
+        VIDEO_FB_WIDTH * scale, VIDEO_FB_HEIGHT * scale * 2, 0);
     if (!g_win) { (void)0; return -1; }
     g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED);
     if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, 0);
     if (!g_ren) { (void)0; return -1; }
     g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888,
-        SDL_TEXTUREACCESS_STREAMING, FB_W, FB_H);
+        SDL_TEXTUREACCESS_STREAMING, VIDEO_FB_WIDTH, VIDEO_FB_HEIGHT);
     SDL_RenderSetIntegerScale(g_ren, SDL_TRUE);
-    SDL_RenderSetLogicalSize(g_ren, FB_W, FB_H*2);
+    SDL_RenderSetLogicalSize(g_ren, VIDEO_FB_WIDTH, VIDEO_FB_HEIGHT*2);
     SDL_ShowCursor(SDL_DISABLE);
     return 0;
 }
@@ -4096,8 +4042,6 @@ static int sdl_init(int scale) {
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }*/
 
-static uint32_t palette_to_rgb(uint8_t value)
-{
     /*
      * Triple X palette:
      *
@@ -4105,125 +4049,37 @@ static uint32_t palette_to_rgb(uint8_t value)
      *   bits 4-2: inverted green
      *   bits 1-0: inverted blue
      */
-    uint8_t rgb = (uint8_t)~value;
-
-    unsigned r3 = (rgb >> 5) & 0x07;
-    unsigned g3 = (rgb >> 2) & 0x07;
-    unsigned b2 = rgb & 0x03;
-
-    unsigned r = (r3 * 255U) / 7U;
-    unsigned g = (g3 * 255U) / 7U;
-    unsigned b = (b2 * 255U) / 3U;
-
-    return 0xff000000U |
-           (r << 16) |
-           (g << 8) |
-           b;
-}
 
 
 /* Render VRAM at $4000+ as a 720x256 mono bitmap.
  * Layout: 256 bytes per scanline (90 displayed, 166 invisible).  Confirmed
  * by the CARETAKER 1.3 firmware drawing "Please insert the key disc" at
  * VRAM offset $1200 with stride 256. */
-static void get_display_colours(uint32_t colors[4])
+
+
+static void render_frame(void)
 {
-    /*
-	* TODO: Runtime palette programming.
-	*
-	* Boot-time display colours are currently emulated using known display
-	* states. OpenTop's Palette Editor does not appear to program the SP
-	* palette through the currently emulated $03F0 mailbox or direct
-	* $0500-$050F SP palette writes.
-	*
-	* Runtime palette changes require tracing the host video-driver path
-	* to determine the original hardware palette programming mechanism.
-	*/
-	
-	
-	
-	switch (g_video_display_state) {
-    case VIDEO_DISPLAY_PALE_BLUE:
-        /* Power-on/RAM-test screen: the entire display is cyan. */
-        colors[0] = 0xFF00FFFFu;
-        colors[1] = 0xFF00FFFFu;
-        colors[2] = 0xFF00FFFFu;
-        colors[3] = 0xFF00FFFFu;
-        break;
+    video_render_framebuffer(g_vram, g_fb);
 
-    case VIDEO_DISPLAY_DARK_BLUE:
-        /* RAM test complete/Caretaker version display.  Index 0 is the
-         * background and index 3 is the principal foreground colour.
-         * Background is dark blue and text is cyan. */
-        colors[0] = 0xFF0000FFu;
-        colors[1] = 0xFF49658Fu;
-        colors[2] = 0xFF7891B5u;
-        colors[3] = 0xFF00FFFFu;
-        break;
+    SDL_UpdateTexture(
+        g_tex,
+        NULL,
+        g_fb,
+        VIDEO_FB_WIDTH * 4
+    );
 
-    case VIDEO_DISPLAY_NORMAL:
-    default:
-        if (g_runtime_palette_programmed) {
-            /* OpenTop or another program has written the palette after
-             * startup.  Honour the physical 16-entry palette RAM exactly. */
-            colors[0] = palette_to_rgb(g_palette[0]);
-            colors[1] = palette_to_rgb(g_palette[1]);
-            colors[2] = palette_to_rgb(g_palette[2]);
-            colors[3] = palette_to_rgb(g_palette[3]);
-        } else {
-            /* Normal Caretaker/OpenTop colours observed on real hardware. */
-            colors[0] = 0xFFD8D8D8u;  /* grey background */
-            colors[1] = 0xFFD00000u;  /* red */
-            colors[2] = 0xFF00A000u;  /* green */
-            /*colors[2] = 0xFF0000A0u;  /* blue */
-            colors[3] = 0xFF000000u;  /* black */
-        }
-        break;
-    }
-}
-
-/* Render VRAM as a 720x256, four-colour (2 bits per pixel) display.
- * Each scanline occupies 256 bytes; the first two bytes are not displayed
- * and the following 180 bytes contain 720 visible pixels. */
-static void render_frame_to_fb(void)
-{
-    const int STRIDE = 256;
-    const int BYTES_PER_ROW = 180;
-    uint32_t colors[4];
-
-    get_display_colours(colors);
-
-    for (int y = 0; y < FB_H; y++) {
-        uint32_t base = (uint32_t)y * STRIDE + 2;
-
-        for (int xb = 0; xb < BYTES_PER_ROW; xb++) {
-            uint8_t v = g_vram[(base + (uint32_t)xb) & 0xFFFFu];
-            int x = xb * 4;
-
-            g_fb[y * FB_W + x + 0] = colors[(v >> 6) & 3];
-            g_fb[y * FB_W + x + 1] = colors[(v >> 4) & 3];
-            g_fb[y * FB_W + x + 2] = colors[(v >> 2) & 3];
-            g_fb[y * FB_W + x + 3] = colors[v & 3];
-        }
-    }
-}
-
-static void render_frame(void) {
-    render_frame_to_fb();
-    SDL_UpdateTexture(g_tex, NULL, g_fb, FB_W * 4);
     SDL_RenderClear(g_ren);
     SDL_RenderCopy(g_ren, g_tex, NULL, NULL);
     SDL_RenderPresent(g_ren);
 }
-
 /* Dump the current framebuffer as a binary PPM -- lets us inspect the
  * screen without a live display (SDL dummy video driver). */
 static void dump_ppm(const char *path) {
-    render_frame_to_fb();
+    video_render_framebuffer(g_vram, g_fb);
     FILE *p = fopen(path, "wb");
     if (!p) { perror(path); return; }
-    fprintf(p, "P6\n%d %d\n255\n", FB_W, FB_H);
-    for (int i = 0; i < FB_W * FB_H; i++) {
+    fprintf(p, "P6\n%d %d\n255\n", VIDEO_FB_WIDTH, VIDEO_FB_HEIGHT);
+    for (int i = 0; i < VIDEO_FB_WIDTH * VIDEO_FB_HEIGHT; i++) {
         uint32_t c = g_fb[i];
         unsigned char rgb[3] = { (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF };
         fwrite(rgb, 1, 3, p);
@@ -4558,15 +4414,18 @@ int main(int argc, char **argv) {
              * On real Triple X, the 6845E CRTC VSYNC output is routed
              * (via service-bus glue) to the 74148 priority encoder
              * feeding the 68010's IPL pins. */
+           
             static int prev_vsync = 0;
-            if (g_crtc_in_vsync && !prev_vsync) host_irq_assert(6);
-            prev_vsync = g_crtc_in_vsync;
+            int current_vsync = video_crtc_in_vsync();
+
+            if (current_vsync && !prev_vsync)
+                host_irq_assert(6);
+
+            prev_vsync = current_vsync;        
         }
 #endif
-        if (++g_crtc_cycles >= 4000) {
-            g_crtc_cycles = 0;
-            g_crtc_in_vsync = !g_crtc_in_vsync;
-        }
+        video_crtc_tick();    
+        
 #ifdef USE_SDL
         static int fullscreen = 0;
         /* Refresh display ~60 Hz; at ~1MHz CPU, one frame is ~16K cycles. */
