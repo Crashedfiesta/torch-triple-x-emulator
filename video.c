@@ -3,17 +3,22 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifdef USE_SDL
+#include <SDL2/SDL.h>
+#endif
+
 /*
  * Motorola 6845E CRTC state.
  */
 static uint8_t g_crtc_regs[18];
 static uint8_t g_crtc_idx = 0;
 
-static int g_crtc_cycles = 0;
 static int g_crtc_in_vsync = 0;
 
 static int g_crtc_update_strobe = 0;
 static int g_crtc_strobe_reads = 0;
+
+static unsigned int g_crtc_vsync_pending = 0;
 
 uint8_t video_crtc_status(void)
 {
@@ -47,10 +52,39 @@ void video_crtc_write_data(uint8_t value)
 
 void video_crtc_tick(void)
 {
-    if (++g_crtc_cycles >= 4000) {
-        g_crtc_cycles = 0;
-        g_crtc_in_vsync = !g_crtc_in_vsync;
+#ifdef USE_SDL
+    static Uint64 last_counter = 0;
+    static Uint64 accumulator = 0;
+
+    Uint64 now = SDL_GetPerformanceCounter();
+    Uint64 freq = SDL_GetPerformanceFrequency();
+    Uint64 frame_ticks = freq / 50;
+
+    if (last_counter == 0) {
+        last_counter = now;
+        return;
     }
+
+    accumulator += now - last_counter;
+    last_counter = now;
+
+    /*
+     * Generate one VSYNC event for every elapsed 20 ms period.
+     * This cannot be missed merely because the main loop wasn't
+     * running at the instant VSYNC occurred.
+     */
+    while (accumulator >= frame_ticks) {
+        accumulator -= frame_ticks;
+        g_crtc_vsync_pending++;
+    }
+
+    /*
+     * Approximate the actual VSYNC status level separately.
+     * This is only for software reading the CRTC status.
+     */
+    g_crtc_in_vsync =
+        (accumulator < (freq / 1000)) ? 1 : 0;
+#endif
 }
 
 int video_crtc_in_vsync(void)
@@ -236,4 +270,11 @@ void video_render_framebuffer(const uint8_t *vram,
     }
 }
 
+int video_crtc_take_vsync(void)
+{
+    if (g_crtc_vsync_pending == 0)
+        return 0;
 
+    g_crtc_vsync_pending--;
+    return 1;
+}

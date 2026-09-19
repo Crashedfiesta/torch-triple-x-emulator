@@ -64,6 +64,6 @@ int video_display_begin_host_mode(void);
  */
 void video_render_framebuffer(const uint8_t *vram, uint32_t *framebuffer);
 
-
+int video_crtc_take_vsync(void);
 #endif
 

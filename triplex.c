@@ -175,8 +175,8 @@ static int g_boot_slow_mode = 0;
 static Uint32 g_boot_slow_start_ms = 0;
 #endif
 
-#define CARETAKER_SLOW_WINDOW_MS 12000
-#define CARETAKER_HOST_DIVISOR 10
+#define CARETAKER_SLOW_WINDOW_MS 9000
+#define CARETAKER_HOST_DIVISOR 25
 
 static int g_caretaker_host_counter = 0;
 
@@ -190,7 +190,7 @@ static void video_display_host_handover(void)
      * visible briefly before switching to normal host-driven video.
      */
     render_frame();
-    SDL_Delay(600);
+    SDL_Delay(1000);
 #endif
 
     if (!video_display_begin_host_mode())
@@ -2544,6 +2544,7 @@ void trigger_bus_error(unsigned int a, int r, int s) { (void)a; (void)r; (void)s
  * acknowledges an interrupt we clear that level's bit and re-assert the
  * highest still pending. */
 static uint8_t g_irq_pending = 0;
+static unsigned int g_irq6_pending_count = 0;
 
 static void host_irq_refresh(void) {
     int top = 0;
@@ -2563,16 +2564,17 @@ static void host_irq_clear(int level) {
 }
 
 extern int g_dmac_irq_vec;       /* HD63450-supplied vector for IRQ3, or -1 */
-int  vme2_int_ack_callback(int level) {
+int vme2_int_ack_callback(int level)
+{
     host_irq_clear(level);
-    /* The HD63450 supplies its own vector (NIV) on the IRQ3 acknowledge. */
+
     int vec = M68K_INT_ACK_AUTOVECTOR;
+
     if (level == 3 && g_dmac_irq_vec >= 0) {
         vec = g_dmac_irq_vec;
         g_dmac_irq_vec = -1;
     }
-    if (0)
-        (void)0;
+
     return vec;
 }
 
@@ -4343,6 +4345,8 @@ int main(int argc, char **argv) {
 #ifdef USE_M68K
         /* Once SP has reached its main idle loop, snapshot shared RAM into
          * the host's view and start the host CPU. */
+         
+         
         if (use_host && !host_started && g_host_p1_released) {
             host_sync_from_sp();
             m68k_pulse_reset();
@@ -4379,6 +4383,10 @@ int main(int argc, char **argv) {
             /* I/O regs (PTM, ACIA, RTC) intentionally retained so the
              * RTC/CMOS settings (B-NET/NFS bits, MAC) survive reboot. */
         }
+        
+        
+        video_crtc_tick();
+        
         if (use_host && host_started && !g_host_halted) {
 
         #ifdef USE_SDL
@@ -4387,6 +4395,8 @@ int main(int argc, char **argv) {
 
             g_boot_slow_mode = 0;
             g_caretaker_host_counter = 0;
+
+            rtc_sync_from_host();
 
             fprintf(stderr,
                     "[BOOT] Caretaker restored to full speed\n");
@@ -4415,16 +4425,19 @@ int main(int argc, char **argv) {
              * (via service-bus glue) to the 74148 priority encoder
              * feeding the 68010's IPL pins. */
            
-            static int prev_vsync = 0;
+            /*static int prev_vsync = 0;
             int current_vsync = video_crtc_in_vsync();
 
             if (current_vsync && !prev_vsync)
                 host_irq_assert(6);
-
-            prev_vsync = current_vsync;        
+                  
+            prev_vsync = current_vsync;        */
+            if (video_crtc_take_vsync())
+                host_irq_assert(6);
+                //host_irq6_pulse();
         }
 #endif
-        video_crtc_tick();    
+  
         
 #ifdef USE_SDL
         static int fullscreen = 0;

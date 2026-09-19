@@ -184,11 +184,11 @@ void rtc_sync_from_host(void)
      *
      *     localtime_s(struct tm *, const time_t *)
      */
-    if (gmtime_s(&local_tm, &now) != 0){
+    if (localtime_s(&local_tm, &now) != 0){
 		return;
 	}
 	fprintf(stderr,
-			"[RTC HOST] localtime=%04d-%02d-%02d %02d:%02d:%02d "
+			"[RTC HOST] UTC=%04d-%02d-%02d %02d:%02d:%02d "
 			"isdst=%d\n",
 			local_tm.tm_year + 1900,
 			local_tm.tm_mon + 1,
@@ -200,10 +200,10 @@ void rtc_sync_from_host(void)
 #else
 
     /*
-     * Use ordinary localtime() here for broad compatibility with older
-     * Unix/Linux C libraries.  Copy the result immediately.
+     * The Torch RTC stores UTC.  Torch UNIX applies its own
+     * timezone / daylight-saving correction.
      */
-    tm_ptr = localtime(&now);
+    tm_ptr = gmtime(&now);
 
     if (tm_ptr == NULL)
         return;
@@ -289,7 +289,7 @@ void rtc_sync_from_host(void)
  */
 void rtc_tick(int cycles)
 {
-    g_rtc_clock_div += cycles;
+    /*g_rtc_clock_div += cycles;
 
     if (g_rtc_clock_div >= 200000) {
         g_rtc_clock_div = 0;
@@ -299,6 +299,17 @@ void rtc_tick(int cycles)
 		
 		g_rtc_user_ram[0x00] =
 			rtc_encode_value(g_rtc_sec_in_emu);
+    }*/
+    static time_t last_update = (time_t)-1;
+    time_t now;
+
+    (void)cycles;
+
+    now = time(NULL);
+
+    if (now != last_update) {
+        last_update = now;
+        rtc_sync_from_host();
     }
 }
 
