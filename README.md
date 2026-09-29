@@ -60,11 +60,19 @@ Users must provide their own legally obtained copies.
 
 ## Networking
 
-Instructions for tap0 - coming soon.
+Run the 'torch-network.sh' script before running the emulator. Requires sudo priveleges.
+Once in Torch terminal, use 'su' to elevate to root then execute:
+
+ifconfig la0 192.168.2.2
+default route add 192.168.2.1 1
+
+Then try and ping '8.8.8.8'. If you get a message that it is alive then network is up and running.
+
+Not available in Windows.
 
 ## Known limitations
 
-Crashes within Unix are quite common. Suspect it could be MMU related but I don't know enough about the MMU.. Be prepared!
+Crashes within Unix are quite common. Suspect it could be MMU related but I don't know enough about the MMU (I didn't do that code!).. Be prepared!
 
 Crashes at startup also occur more than you'd expect:
 
