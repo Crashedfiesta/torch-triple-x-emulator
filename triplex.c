@@ -798,6 +798,21 @@ static int g_disk_writeable    = 0;
 static int g_disk_fd = -1;
 #endif
 
+
+
+
+/* Second hard disk: SCSI ID 4, LUN 0 */
+static uint8_t *g_disk4_image   = NULL;
+static size_t   g_disk4_size    = 0;
+static int      g_disk4_writeable = 0;
+
+#ifdef _WIN32
+static int g_disk4_fd = -1;
+#endif
+
+
+
+
 static uint8_t *g_keydisk_image = NULL;
 static size_t   g_keydisk_size  = 0;
 
@@ -1033,6 +1048,94 @@ void ncr_load_disk(const char *path) {
 	return;
 }
 
+
+void ncr_load_disk4(const char *path) {
+
+#ifdef _WIN32
+
+    g_disk4_image = host_load_image(
+        path,
+        &g_disk4_size,
+        &g_disk4_fd,
+        &g_disk4_writeable
+    );
+
+    if (g_disk4_image == NULL) {
+        fprintf(stderr,
+                "Unable to load SCSI ID 1 disk image: %s\n",
+                path);
+        return;
+    }
+
+#else
+
+    int fd = open(path, O_RDWR);
+    g_disk4_writeable = 1;
+
+    if (fd < 0) {
+        fd = open(path, O_RDONLY);
+        g_disk4_writeable = 0;
+
+        if (fd < 0) {
+            perror(path);
+            return;
+        }
+    }
+
+    struct stat st;
+
+    if (fstat(fd, &st) != 0) {
+        perror("fstat disk1");
+        close(fd);
+        return;
+    }
+
+    g_disk4_size = st.st_size;
+
+    int prot = g_disk4_writeable
+        ? (PROT_READ | PROT_WRITE)
+        : PROT_READ;
+
+    int flag = g_disk4_writeable
+        ? MAP_SHARED
+        : MAP_PRIVATE;
+
+    g_disk4_image = (uint8_t *)mmap(
+        NULL,
+        g_disk4_size,
+        prot,
+        flag,
+        fd,
+        0
+    );
+
+    if (g_disk4_image == MAP_FAILED) {
+        perror("mmap disk1");
+        g_disk4_image = NULL;
+        close(fd);
+        return;
+    }
+
+    close(fd);
+
+#endif
+
+    fprintf(stderr,
+            "[DISK1] %s: %zu bytes, %zu x %d-byte blocks (%s)\n",
+            path,
+            g_disk4_size,
+            g_disk4_size / SCSI_BLOCK_SIZE,
+            SCSI_BLOCK_SIZE,
+            g_disk4_writeable
+                ? "writes persist to file"
+                : "read-only");
+}
+
+
+
+
+
+
 /* One decoded sector from an IMD image. */
 typedef struct {
     int cyl, head, sec, size;
@@ -1265,6 +1368,7 @@ static void ncr_tick_select(void);
 typedef enum {
     HOST_WRITE_NONE = 0,
     HOST_WRITE_DISK,
+    HOST_WRITE_DISK4,
     HOST_WRITE_UNIX_FLOPPY
 } host_write_target_t;
 
@@ -1587,6 +1691,11 @@ static void scsi_dispatch_cdb(void) {
         /* ID 0, LUN 0: main hard disk */
         img   = g_disk_image;
         imgsz = g_disk_size;
+    }    
+    else if (target == 1 && unit == 0) {
+        /* ID 4, LUN 0: second hard disk */
+        img   = g_disk4_image;
+        imgsz = g_disk4_size;
     }
     else if (target == 0 && unit == 2) {
         /* ID 0, LUN 2: ordinary Unix floppy */
@@ -1599,7 +1708,25 @@ static void scsi_dispatch_cdb(void) {
         imgsz = g_keydisk_size;
     }
 
-        
+    
+    if (TRACE_SCSI) {
+    fprintf(stderr,
+            "[SCSI TARGET] ID=%d LUN=%d source=%s size=%zu\n",
+            target,
+            unit,
+            (img == g_disk_image)        ? "DISK0" :
+            (img == g_disk4_image)       ? "DISK4" :
+            (img == g_unix_floppy_image) ? "UNIX-FLOPPY" :
+            (img == g_keydisk_image)     ? "KEYDISK" :
+                                           "NONE",
+            imgsz);
+}
+    
+    
+    
+    
+    
+    
     if (unit == 2) {
         const char *src =
             (img == g_keydisk_image)     ? "KEYDISK" :
@@ -1925,6 +2052,9 @@ static void scsi_dispatch_cdb(void) {
 			if (img == g_disk_image) {
 				g_pending_write_target = HOST_WRITE_DISK;
 			}
+			else if (img == g_disk4_image) {
+                g_pending_write_target = HOST_WRITE_DISK4;
+            }    
 			else if (img == g_unix_floppy_image) {
 				g_pending_write_target = HOST_WRITE_UNIX_FLOPPY;
 			}
@@ -1957,11 +2087,14 @@ static void scsi_dispatch_cdb(void) {
 			if (img == g_disk_image) {
 				g_pending_write_target = HOST_WRITE_DISK;
 			}
+			else if (img == g_disk4_image) {
+                g_pending_write_target = HOST_WRITE_DISK4;
+            }
 			else if (img == g_unix_floppy_image) {
-				g_pending_write_target = HOST_WRITE_UNIX_FLOPPY;
+			    g_pending_write_target = HOST_WRITE_UNIX_FLOPPY;
 			}
 			else {
-				g_pending_write_target = HOST_WRITE_NONE;
+			    g_pending_write_target = HOST_WRITE_NONE;
 			}
 		#endif
 			
@@ -2217,6 +2350,21 @@ static void ncr_advance_phase(void) {
                                 "[DISK] Write attempted on "
                                 "read-only disk image\n");
                     }
+                else if (g_pending_write_target == HOST_WRITE_DISK4) {
+
+                    if (g_disk4_writeable) {
+                        write_result = host_write_image_data(
+                            g_disk4_fd,
+                            g_pending_write_offset,
+                            g_disk4_image + g_pending_write_offset,
+                            g_pending_write_length
+                        );
+                    }       
+                    else {
+                        fprintf(stderr,
+                                    "[DISK4] Write attempted on "
+                                    "read-only disk image\n");
+                    }                             
                 }
 				else if (g_pending_write_target ==
                          HOST_WRITE_UNIX_FLOPPY) {
@@ -4153,6 +4301,7 @@ int main(int argc, char **argv) {
   #endif
     const char *rom_path  = "triplex.rom";
     const char *disk_path = NULL;
+    const char *disk4_path = NULL;
     const char *g_tap_name = NULL;
     extern int g_lance_trace;  /* defined below; forward decl for early callers */
     int g_test_reboot = 0;             /* --test-reboot: inject cmd $0B at boot */
@@ -4167,6 +4316,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--rom") && i+1 < argc) rom_path = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i+1 < argc) disk_path = argv[++i];
+        else if (!strcmp(argv[i], "--disk4") && i+1 < argc) disk4_path = argv[++i];
         else if (!strcmp(argv[i], "--keydisk") && i+1 < argc) keydisk_path = argv[++i];
 
         else if (!strcmp(argv[i], "--unix-floppy") && i+1 < argc) unix_floppy_path = argv[++i];
@@ -4187,7 +4337,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             printf("Torch Triple X emulator (HD6303R service processor)\n"
                    "  --rom PATH          EPROM image (default triplex.rom)\n"
-                   "  --disk PATH         raw SCSI hard-disc image (NCR5380 unit 0)\n"
+                   "  --disk PATH         raw SCSI hard-disk image (NCR5380 unit 0)\n"
+                   "  --disk4 PATH        raw SCSI hard-disk image (NCR5380 unit 4)\n"
                    "  --keydisk PATH      ImageDisk (.IMD) key disc (NCR5380 unit 1)\n"
                    "  --unix-floppy PATH  Raw 512 byte sector floppy image mounted as SCSI unit 1\n"
                    "  --host              also run the MC68010 host CPU\n"
@@ -4248,6 +4399,11 @@ int main(int argc, char **argv) {
         extern void ncr_load_disk(const char *);
         ncr_load_disk(disk_path);
     }
+    if (disk4_path) {
+        extern void ncr_load_disk4(const char *);
+        ncr_load_disk4(disk4_path);
+    }
+  
     if (keydisk_path) {
         extern void ncr_load_keydisk_imd(const char *);
         ncr_load_keydisk_imd(keydisk_path);
