@@ -41,6 +41,7 @@ For best results, use your favourite flavour of Linux. ;)
 Execute 'triplex' from a terminal window. The following options are available:
 
  - --disk           (the hard disk image to use - uses SCSI ID 0 LUN 0)
+ - --disk4          (a second hard disk image to use - uses SCSI ID 1 LUN 0 - the '4' is long story, just go with it)
  - --unix-floppy    (the regular floppy disk image to use)
  - --key-disk       (the 'key disk' image to use - note this must be in .imd format)
  - --sdl            (use the SDL library to construct the required windows)
