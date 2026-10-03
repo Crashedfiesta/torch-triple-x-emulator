@@ -80,9 +80,9 @@ Crashes at startup also occur more than you'd expect:
 - Stuck on dark blue 'Caretaker' screen - close triplex and try again
 - Stuck on pale blue screen - close triplex and try again
 - Stuck on booting OpenTop (normally the top border of a window is all that is visible) - close triplex and start again
-- 'Error on read' message. Either:
+- 'Error on read' message. Click on the '=' button twice to get rid of the error notification. Then, either:
   - click on the 'Go' icon, or
-  - click 'OK' or '=' on the window until the three boot icons appear. Click on the boot and press enter to err... boot.
+  - click on the boot and press enter to err... boot (you could type 'unix' at this point but that's the default anyway).
 
 ## Credits
 
