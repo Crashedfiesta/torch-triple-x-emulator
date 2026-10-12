@@ -65,7 +65,7 @@ A terminal 'front end' that adds bash-like functionality is on the desktop under
 ## Networking
 
 Run the 'torch-network.sh' script before running the emulator. Requires sudo priveleges.
-Once in Torch terminal (either sh or 'ptyed'), use 'su' to elevate to root then execute:
+Once in Torch terminal (either sh or 'ptyed'), use 'su', or 'psu' in ptyed,to elevate to root then execute:
 
 ifconfig la0 192.168.2.2
 
