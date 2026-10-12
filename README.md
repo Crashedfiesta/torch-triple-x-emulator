@@ -58,10 +58,14 @@ For example:
 ROM, Key Disk and operating system images are supplied with this repository.
 Contact me for any issues on this.
 
+## OpenTop
+OpenTop is the Torch window based OS. Various terminals are provided based on the ancient 'sh' which is very basic.
+A terminal 'front end' that adds bash-like functionality is on the desktop under 'ptyed'. To elevate privileges in ptyed use 'psu' instead of 'su'.
+
 ## Networking
 
 Run the 'torch-network.sh' script before running the emulator. Requires sudo priveleges.
-Once in Torch terminal, use 'su' to elevate to root then execute:
+Once in Torch terminal (either sh or 'ptyed', use 'su' to elevate to root then execute:
 
 ifconfig la0 192.168.2.2
 
