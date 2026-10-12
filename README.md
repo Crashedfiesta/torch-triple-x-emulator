@@ -55,8 +55,8 @@ For example:
 
 ## ROMs and disk images
 
-ROM, Key Disk and operating system images are not supplied with this repository.
-Users must provide their own legally obtained copies.
+ROM, Key Disk and operating system images are supplied with this repository.
+Contact me for any issues on this.
 
 ## Networking
 
