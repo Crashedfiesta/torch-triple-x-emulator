@@ -58,6 +58,11 @@ For example:
 ROM, Key Disk and operating system images are supplied with this repository.
 Contact me for any issues on this.
 
+The disk image is a 1 gigabyte image that has more space than anyone should ever need on a Torch. Unpack it in the same folder as the application, ROM and keydisk files.
+There are games under /usr/games including an early(ish) version of 'Adventure' amongst others.
+
+In theory, the image should work on real hardware via a BlueSCSI. Not tested though as my real hardware is currently not working. :(
+
 ## OpenTop
 OpenTop is the Torch window based OS. Various terminals are provided based on the ancient 'sh' which is very basic.
 A terminal 'front end' that adds bash-like functionality is on the desktop under 'ptyed'. To elevate privileges in ptyed use 'psu' instead of 'su'.
