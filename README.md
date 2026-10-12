@@ -1,6 +1,6 @@
 # Torch Triple X Emulator
 
-An emulator for the Torch Triple X workstation from c.1986 (the Torch that is, not the emulator ;) ).
+An emulator for the Torch Triple X workstation.
 
 This project includes a modified copy of Musashi 4.60 as the Motorola 680x0 CPU emulation core. 
 The Musashi sources have been adapted for the Torch Triple X emulator, particularly around MMU and bus-error handling. 
