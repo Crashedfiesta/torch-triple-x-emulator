@@ -1592,7 +1592,7 @@ static int scsi_cdb_length(uint8_t op) {
 static void scsi_dispatch_cdb(void) {
     uint8_t op = g_ncr.cmd_bytes[0];
 
-    if (TRACE_SCSI){
+    /*if (TRACE_SCSI){
         fprintf(stderr,
             "[SCSI] op=%02X unit=%d cdb=%02X %02X %02X %02X %02X %02X phase=%d\n",
             op,
@@ -1604,7 +1604,7 @@ static void scsi_dispatch_cdb(void) {
             g_ncr.cmd_bytes[4],
             g_ncr.cmd_bytes[5],
             g_ncr.phase);
-    }
+    }*/
 
     g_ncr.data_buf = NULL;
     g_ncr.data_len = 0;
@@ -1715,7 +1715,7 @@ static void scsi_dispatch_cdb(void) {
             target,
             unit,
             (img == g_disk_image)        ? "DISK0" :
-            (img == g_disk4_image)       ? "DISK4" :
+            (img == g_disk4_image)       ? "DISK1" :
             (img == g_unix_floppy_image) ? "UNIX-FLOPPY" :
             (img == g_keydisk_image)     ? "KEYDISK" :
                                            "NONE",
