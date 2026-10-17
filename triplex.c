@@ -210,24 +210,266 @@ static void video_display_host_handover(void)
 
 
 
+/*
+ * Speaker audio.
+ *
+ * The existing scheduler advances 64000 timer ticks per 16 ms frame.
+ * This rate matches that scheduler; hardware clock accuracy can be
+ * addressed separately.
+ */
+#define TORCH_AUDIO_TICK_HZ 4000000u
+#define TORCH_AUDIO_RATE      48000u
+#define TORCH_AUDIO_BLOCK        512
+
+/* Timer output latch: TCSR.OLVL is copied here on compare match. */
+static int g_speaker_level = 0;
+
+#ifdef USE_SDL
+static SDL_AudioDeviceID g_audio_device = 0;
+static Sint16 g_audio_samples[TORCH_AUDIO_BLOCK];
+static unsigned g_audio_count = 0;
+
+/* Accumulate the average signal level over each output sample. */
+static uint32_t g_audio_sample_units = 0;
+static int64_t g_audio_sample_sum = 0;
+
+/* Simple DC blocking, representing the AC-coupled speaker path. */
+static float g_audio_previous_input = 0.0f;
+static float g_audio_previous_output = 0.0f;
+
+static void speaker_flush(void)
+{
+    if (!g_audio_device || !g_audio_count)
+        return;
+
+    /*
+     * Bound latency when running faster than real time.
+     * At 48 kHz mono S16, 9600 bytes represents 100 ms.
+     */
+    if (SDL_GetQueuedAudioSize(g_audio_device) < 9600u) {
+        if (SDL_QueueAudio(g_audio_device, g_audio_samples,
+                          g_audio_count * sizeof(g_audio_samples[0])) < 0) {
+            fprintf(stderr, "[AUDIO] Queue failed: %s\n", SDL_GetError());
+            SDL_CloseAudioDevice(g_audio_device);
+            g_audio_device = 0;
+        }
+    }
+
+    g_audio_count = 0;
+}
+
+static void speaker_init(void)
+{
+    SDL_AudioSpec wanted;
+    SDL_AudioSpec obtained;
+
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "[AUDIO] Disabled: %s\n", SDL_GetError());
+        return;
+    }
+
+    SDL_zero(wanted);
+    wanted.freq = TORCH_AUDIO_RATE;
+    wanted.format = AUDIO_S16SYS;
+    wanted.channels = 1;
+    wanted.samples = TORCH_AUDIO_BLOCK;
+    wanted.callback = NULL;  /* SDL_QueueAudio supplies the samples. */
+
+    g_audio_device = SDL_OpenAudioDevice(
+        NULL, 0, &wanted, &obtained, 0);
+
+    if (!g_audio_device) {
+        fprintf(stderr, "[AUDIO] Disabled: %s\n", SDL_GetError());
+        return;
+    }
+
+    fprintf(stderr, "[AUDIO] Enabled: %d Hz, mono\n", obtained.freq);
+    SDL_PauseAudioDevice(g_audio_device, 0);
+}
+
+static void speaker_reset(void)
+{
+    g_speaker_level = 0;
+    g_audio_count = 0;
+    g_audio_sample_units = 0;
+    g_audio_sample_sum = 0;
+    g_audio_previous_input = 0.0f;
+    g_audio_previous_output = 0.0f;
+
+    if (g_audio_device)
+        SDL_ClearQueuedAudio(g_audio_device);
+}
+
+static void speaker_shutdown(void)
+{
+    if (g_audio_device) {
+        SDL_CloseAudioDevice(g_audio_device);
+        g_audio_device = 0;
+    }
+}
+
+/*
+ * Advance a constant speaker level for the specified timer ticks.
+ * Integer units let us average transitions within an audio sample.
+ */
+static void speaker_advance(unsigned ticks, int level)
+{
+    uint64_t remaining;
+    int amplitude;
+
+    if (!g_audio_device)
+        return;
+
+    /* DDR2 bit 1 enables P21 as the timer output. */
+    amplitude = (g_io[0x01] & 0x02)
+        ? (level ? 2500 : -2500)
+        : 0;
+
+    remaining = (uint64_t)ticks * TORCH_AUDIO_RATE;
+
+    while (remaining) {
+        uint32_t space = TORCH_AUDIO_TICK_HZ - g_audio_sample_units;
+        uint32_t take = remaining < space
+            ? (uint32_t)remaining : space;
+
+        g_audio_sample_sum += (int64_t)amplitude * take;
+        g_audio_sample_units += take;
+        remaining -= take;
+
+        if (g_audio_sample_units == TORCH_AUDIO_TICK_HZ) {
+            float input = (float)g_audio_sample_sum /
+                          (float)TORCH_AUDIO_TICK_HZ;
+            float output = input - g_audio_previous_input +
+                           0.995f * g_audio_previous_output;
+
+            g_audio_previous_input = input;
+            g_audio_previous_output = output;
+
+            if (output > 32767.0f) output = 32767.0f;
+            if (output < -32768.0f) output = -32768.0f;
+
+            g_audio_samples[g_audio_count++] = (Sint16)output;
+            g_audio_sample_units = 0;
+            g_audio_sample_sum = 0;
+
+            if (g_audio_count == TORCH_AUDIO_BLOCK)
+                speaker_flush();
+        }
+    }
+}
+#else
+static void speaker_init(void) {}
+static void speaker_reset(void) { g_speaker_level = 0; }
+static void speaker_shutdown(void) {}
+static void speaker_advance(unsigned ticks, int level)
+{
+    (void)ticks;
+    (void)level;
+}
+#endif
+
+
+
+
+
+
+
 /* HD6303R internal Free-Running Counter (FRC) at $09-$0A.
  * Output Compare Register (OCR) at $0B-$0C.
  * TCSR ($08) bit 6 = OCF set when FRC == OCR.
  * TCSR ($08) bit 5 = TOF set when FRC wraps from $FFFF to $0000.   */
 static uint16_t g_frc = 0;
-static void tick_timer(int cycles) {
+
+
+
+
+/*static void tick_timer(int cycles) {
     uint16_t ocr = (g_io[0x0B] << 8) | g_io[0x0C];
     uint16_t new_frc = g_frc + cycles;
-    /* Detect OCR match crossing within this tick */
     if ((g_frc <= ocr && new_frc >= ocr) ||
         (cycles > 0 && new_frc < g_frc && (g_frc <= ocr || new_frc >= ocr))) {
-        g_io[0x08] |= 0x40;   /* set OCF */
+        g_io[0x08] |= 0x40;
     }
-    if (new_frc < g_frc) g_io[0x08] |= 0x20;  /* set TOF on overflow */
+    if (new_frc < g_frc) g_io[0x08] |= 0x20;
     g_frc = new_frc;
     g_io[0x09] = g_frc >> 8;
     g_io[0x0A] = g_frc & 0xFF;
 }
+*/
+
+static unsigned g_vsync_ticks = 0;
+
+static void tick_vsync(unsigned cycles)
+{
+    const unsigned period = TORCH_AUDIO_TICK_HZ / 50u;
+
+    g_vsync_ticks += cycles;
+
+    while (g_vsync_ticks >= period) {
+        g_vsync_ticks -= period;
+
+        /* Capture the timer at the selected VSYNC edge. */
+        g_io[0x0D] = g_frc >> 8;
+        g_io[0x0E] = g_frc & 0xFF;
+        g_io[0x08] |= 0x80;  /* ICF */
+    }
+}
+
+
+
+static void tick_timer(int cycles)
+{
+    uint16_t ocr;
+    uint32_t distance;
+    uint32_t total;
+
+    if (cycles <= 0)
+        return;
+
+    ocr = ((uint16_t)g_io[0x0B] << 8) | g_io[0x0C];
+
+    /*
+     * Distance to the NEXT compare match.
+     * Equality at the start means the next match is one wrap away,
+     * rather than an immediate repeat of the previous match.
+     */
+    distance = (uint16_t)(ocr - g_frc);
+    if (distance == 0)
+        distance = 65536u;
+
+    if ((uint32_t)cycles >= distance) {
+        /* Generate samples up to the precise compare point. */
+        speaker_advance(distance, g_speaker_level);
+
+        /* Hardware copies OLVL to its timer output at the match. */
+        g_speaker_level = g_io[0x08] & 0x01;
+        g_io[0x08] |= 0x40;  /* OCF */
+
+        speaker_advance((unsigned)cycles - distance,
+                        g_speaker_level);
+    } else {
+        speaker_advance((unsigned)cycles, g_speaker_level);
+    }
+
+    total = (uint32_t)g_frc + (uint32_t)cycles;
+
+    if (total >= 65536u)
+        g_io[0x08] |= 0x20;  /* TOF */
+
+    g_frc = (uint16_t)total;
+    g_io[0x09] = g_frc >> 8;
+    g_io[0x0A] = g_frc & 0xFF;
+}
+
+
+static int icf_pending(void)
+{
+    /* ICF set, input-capture interrupt enabled, CPU IRQs enabled. */
+    return (g_io[0x08] & 0x90) == 0x90 &&
+           !(cpu.cc & CC_I);
+}
+
+
 
 /* Should we fire an OCF interrupt right now?
  * Conditions:  TCSR bit 6 (OCF) set AND TCSR bit 3 (EOCI) set AND I flag clear */
@@ -301,6 +543,20 @@ static uint8_t io_reg_read(uint16_t addr) {
     }
     if (addr == 0x09) return g_frc >> 8;
     if (addr == 0x0A) return g_frc & 0xFF;
+    
+    if (addr == 0x0D) {
+        /*
+         * Simplified input-capture acknowledgement.
+         * The ROM reads TCSR, then the capture register.
+         */
+        uint8_t value = g_io[0x0D];
+        g_io[0x08] &= ~0x80;
+        return value;
+    }
+    if (addr == 0x0E)
+        return g_io[0x0E];    
+      
+  
     if (addr == 0x11) {
         /* TRCSR: control bits as written, plus live status -- RDRF from
          * our receive state, TDRE always set (transmit never blocks). */
@@ -577,6 +833,8 @@ static uint16_t pull16(void)  { uint8_t hi = pull8(); uint8_t lo = pull8(); retu
 
 /* --- Reset & interrupts --- */
 static void cpu_reset(void) {
+    speaker_reset();
+    g_vsync_ticks = 0;
     video_display_reset();
 	rtc_sync_from_host();
     cpu.cc = CC_I | 0xC0;  /* I=1, top two bits always 1 */
@@ -4177,6 +4435,7 @@ static int sdl_init(int scale) {
     SDL_RenderSetIntegerScale(g_ren, SDL_TRUE);
     SDL_RenderSetLogicalSize(g_ren, VIDEO_FB_WIDTH, VIDEO_FB_HEIGHT*2);
     SDL_ShowCursor(SDL_DISABLE);
+    speaker_init();
     return 0;
 }
 
@@ -4468,6 +4727,7 @@ int main(int argc, char **argv) {
         /* Sample the SP's PC during the host's hang window, to tell a live
          * CARETAKER (cycling its main loop) from a stuck/crashed one. */
         tick_timer(4);
+        tick_vsync(4);
         ptm_tick(4);
         rtc_tick(4);
         sci_rx_feed();          /* clock queued keyboard bytes into the SCI */
@@ -4487,7 +4747,8 @@ int main(int argc, char **argv) {
          * one of them pulling /IRQ1 low fires the SP IRQ1 ISR at $CC4A).
          * The PTM contribution is the periodic poll-driver that lets the
          * ISR consume mouse bytes even when ACIA Rx IRQ is off. */
-        if (ocf_pending())            cpu_interrupt(0xFFF4);
+        if (icf_pending())            cpu_interrupt(0xFFF6);
+        else if (ocf_pending())       cpu_interrupt(0xFFF4);
         else if (tof_pending())       cpu_interrupt(0xFFF2);
 
         else if (!(cpu.cc & CC_I) &&
@@ -4877,6 +5138,7 @@ int main(int argc, char **argv) {
 #ifdef USE_SDL
     if (shot_path) dump_ppm(shot_path);
 #endif
+    speaker_shutdown();
     (void)verbose;
     return 0;
 }
