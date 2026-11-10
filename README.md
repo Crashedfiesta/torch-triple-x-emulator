@@ -36,7 +36,7 @@ To remove 'triplex' run 'make clean'.
 Note that the code should compile in Windows but there is no Windows network support (yet).
 For best results, use your favourite flavour of Linux. ;)
 
-## Running
+## Running - Command Line
 
 Execute 'triplex' from a terminal window. The following options are available:
 
@@ -52,6 +52,14 @@ Execute 'triplex' from a terminal window. The following options are available:
 For example:
 
 ./triplex --disk HD00.img --unix-floppy FloppyDisk.img --keydisk torch_KEY.imd --sdl --host --scale 1 --tap tap0
+
+## Running - Launcher
+Alternatively, use the Python launcher. Open a terminal and run:
+
+  python3 torch_launcher.py
+
+Requires the tkinter library installed too but that's all. From the nice window you can select all of the files you might need. 
+Very handy for trying different disk images. The options broadly replicate the command line options.
 
 ## ROMs and disk images
 
