@@ -1,0 +1,11 @@
+Bundled from https://github.com/Immediate-Mode-UI/Nuklear on 2026-11-05.
+
+nuklear.h
+https://raw.githubusercontent.com/Immediate-Mode-UI/Nuklear/master/nuklear.h
+SHA256: d6e4c896794b6116fa797b1123fc59a12037c1a4bc8a80412f3e3e906520cb93
+
+nuklear_sdl_renderer.h
+https://raw.githubusercontent.com/Immediate-Mode-UI/Nuklear/master/demo/sdl_renderer/nuklear_sdl_renderer.h
+SHA256: af7bd45818ab4d9033b86ad4a9653c3ec57c092966d2c21d254f083fc16124bd
+
+Upstream licensing is included in the headers (Nuklear MIT/public-domain options; backend public domain).

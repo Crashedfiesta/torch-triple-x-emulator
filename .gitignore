@@ -15,3 +15,8 @@ startnetwork_ROOT.sh
 starttorch.sh
 starttorch_ROOT.sh
 torch-network.sh
+
+# Local backups and archive
+Backup_051126/
+HDD_IMAGES/
+OLD_STUFF/

@@ -54,10 +54,14 @@
 #include "acia.h"
 #include "hd6303_sci.h"
 #include "video.h"
+#include "disk_status.h"
+#include "floppy_media.h"
+#include <sys/stat.h>
 
 
 #ifdef USE_SDL
 #include <SDL2/SDL.h>
+#include "disk_manager.h"
 #endif
 #ifdef USE_M68K
 #include "m68k.h"
@@ -1082,9 +1086,7 @@ static uint8_t *g_unix_floppy_image = NULL;
 static size_t   g_unix_floppy_size  = 0;
 static int 	    g_unix_floppy_writeable = 0;
 
-#ifdef _WIN32
 static int g_unix_floppy_fd = -1;
-#endif
 
 #define SCSI_BLOCK_SIZE 512
 
@@ -1095,6 +1097,95 @@ static int g_unix_floppy_fd = -1;
 static int     g_keydisk_128mode = 0;
 static uint8_t g_modesel_buf[260];   /* MODE SELECT parameter-list receive buffer */
 static int g_keydisk_selected = 0;
+
+/* Set only after each loader successfully obtains its image.
+ * Hard/key startup paths borrow argv; the Unix floppy owns its path. */
+static const char *g_disk_paths[DISK_STATUS_COUNT];
+
+#define DISK_ACTIVITY_HOLD_MS 150u
+typedef struct {
+    uint32_t read_ms, write_ms;
+    int have_read, have_write;
+} DiskActivityTimes;
+static DiskActivityTimes g_disk_activity[DISK_STATUS_COUNT];
+static int g_activity_target = -1;
+static int g_activity_kind = DISK_ACTIVITY_IDLE;
+static int g_activity_started;
+
+static uint32_t ncr_activity_now(void)
+{
+#ifdef USE_SDL
+    return SDL_GetTicks();
+#else
+    /* No GUI in a headless build; retain a dependency-free fallback clock. */
+    return (uint32_t)((uint64_t)clock() * 1000u / CLOCKS_PER_SEC);
+#endif
+}
+
+static void ncr_activity_clear(int index)
+{
+    memset(&g_disk_activity[index], 0, sizeof g_disk_activity[index]);
+    if (g_activity_target == index) {
+        g_activity_target = -1;
+        g_activity_started = 0;
+    }
+}
+
+/* Called only when a real image byte is transferred. Read the clock at the
+ * first/last byte, rather than on every byte of a large DMA transfer. */
+static void ncr_activity_transfer(void)
+{
+    if (g_activity_target < 0) return;
+    if (!g_activity_started || g_ncr.data_len == 1) {
+        DiskActivityTimes *a = &g_disk_activity[g_activity_target];
+        uint32_t now = ncr_activity_now();
+        if (g_activity_kind == DISK_ACTIVITY_WRITE) {
+            a->write_ms = now; a->have_write = 1;
+        } else {
+            a->read_ms = now; a->have_read = 1;
+        }
+    }
+    g_activity_started = 1;
+}
+
+static int ncr_activity_get(int index, uint32_t now)
+{
+    const DiskActivityTimes *a = &g_disk_activity[index];
+    int transferring = g_activity_target == index && g_activity_started &&
+        g_ncr.data_len > 0 &&
+        (g_ncr.phase == PHASE_DATA_IN || g_ncr.phase == PHASE_DATA_OUT);
+    /* Unsigned subtraction also handles SDL's 32-bit tick wrap. */
+    if ((transferring && g_activity_kind == DISK_ACTIVITY_WRITE) ||
+        (a->have_write && (uint32_t)(now - a->write_ms) < DISK_ACTIVITY_HOLD_MS))
+        return DISK_ACTIVITY_WRITE;
+    if ((transferring && g_activity_kind == DISK_ACTIVITY_READ) ||
+        (a->have_read && (uint32_t)(now - a->read_ms) < DISK_ACTIVITY_HOLD_MS))
+        return DISK_ACTIVITY_READ;
+    return DISK_ACTIVITY_IDLE;
+}
+
+
+void ncr_get_disk_status(DiskImageStatus out[DISK_STATUS_COUNT])
+{
+    uint32_t now = ncr_activity_now();
+    const void *images[DISK_STATUS_COUNT] = {
+        g_disk_image, g_disk4_image, g_keydisk_image, g_unix_floppy_image
+    };
+    const size_t sizes[DISK_STATUS_COUNT] = {
+        g_disk_size, g_disk4_size, g_keydisk_size, g_unix_floppy_size
+    };
+    const int writable[DISK_STATUS_COUNT] = {
+        g_disk_writeable, g_disk4_writeable, 0, g_unix_floppy_writeable
+    };
+    for (int i = 0; i < DISK_STATUS_COUNT; ++i) {
+        out[i].loaded = images[i] != NULL && sizes[i] > 0;
+        out[i].path = out[i].loaded ? g_disk_paths[i] : NULL;
+        out[i].size_bytes = out[i].loaded ? sizes[i] : 0;
+        out[i].file_writable = out[i].loaded && writable[i];
+        out[i].activity = out[i].loaded ? ncr_activity_get(i, now) : DISK_ACTIVITY_IDLE;
+    }
+}
+
 #ifdef _WIN32
 
 static uint8_t *host_load_image(
@@ -1278,7 +1369,7 @@ void ncr_load_disk(const char *path) {
 #else
 		  
     int fd = open(path, O_RDWR);
-    int g_disk_writeable = 1;
+    g_disk_writeable = 1;
     if (fd < 0) {
         fd = open(path, O_RDONLY);
         g_disk_writeable = 0;
@@ -1299,6 +1390,8 @@ void ncr_load_disk(const char *path) {
     }
     close(fd);  /* the mapping keeps the file alive */
 #endif	
+
+    g_disk_paths[DISK_STATUS_MAIN] = path;
 
     fprintf(stderr, "[DISK] %s: %zu bytes, %zu × %d-byte blocks (%s)\n",
             path, g_disk_size, g_disk_size / SCSI_BLOCK_SIZE, SCSI_BLOCK_SIZE,
@@ -1377,6 +1470,8 @@ void ncr_load_disk4(const char *path) {
     close(fd);
 
 #endif
+
+    g_disk_paths[DISK_STATUS_EXTRA] = path;
 
     fprintf(stderr,
             "[DISK1] %s: %zu bytes, %zu x %d-byte blocks (%s)\n",
@@ -1457,6 +1552,12 @@ void ncr_load_keydisk_imd(const char *path) {
     qsort(secs, nsecs, sizeof(*secs), imd_sec_cmp);
     g_keydisk_size  = total;
     g_keydisk_image = (uint8_t *)malloc(total ? total : 1);
+    if (!g_keydisk_image) {
+        free(secs);
+        free(raw);
+        g_keydisk_size = 0;
+        return;
+    }
     size_t o = 0;
     for (int i = 0; i < nsecs; i++) {
         if (secs[i].src) memcpy(g_keydisk_image + o, secs[i].src, secs[i].size);
@@ -1465,6 +1566,7 @@ void ncr_load_keydisk_imd(const char *path) {
     }
     free(secs);
     free(raw);
+    if (g_keydisk_size > 0) g_disk_paths[DISK_STATUS_KEY] = path;
     fprintf(stderr, "[FLOPPY] %s: %d sectors -> %zu bytes (%zu × %d-byte blocks)\n",
             path, nsecs, g_keydisk_size, g_keydisk_size / SCSI_BLOCK_SIZE, SCSI_BLOCK_SIZE);
 
@@ -1507,84 +1609,8 @@ void ncr_load_keydisk_imd(const char *path) {
     }
 }
     
-void ncr_load_unix_floppy(const char *path) {
-	
-#ifdef _WIN32
+#include "floppy_media.inc"
 
-    g_unix_floppy_image = host_load_image(
-        path,
-        &g_unix_floppy_size,
-        &g_unix_floppy_fd,
-        &g_unix_floppy_writeable
-    );
-
-    if (g_unix_floppy_image == NULL) {
-        fprintf(stderr,
-                "Unable to load Unix floppy image: %s\n",
-                path);
-        return;
-    }
-
-#else	
-		
-    int fd = open(path, O_RDWR);
-    int g_unix_floppy_writeable = 1;
-
-    if (fd < 0) {
-        fd = open(path, O_RDONLY);
-        g_unix_floppy_writeable = 0;
-        if (fd < 0) {
-            perror(path);
-            return;
-        }
-    }
-
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        perror("fstat unix floppy");
-        close(fd);
-        return;
-    }
-
-    if (st.st_size <= 0) {
-        fprintf(stderr, "[UNIX-FLOPPY] %s: empty image, not loaded\n", path);
-        close(fd);
-        return;
-    }
-
-    if ((st.st_size % SCSI_BLOCK_SIZE) != 0) {
-        fprintf(stderr,
-                "[UNIX-FLOPPY] warning: %s size %ld is not a multiple of %d\n",
-                path, (long)st.st_size, SCSI_BLOCK_SIZE);
-    }
-
-    g_unix_floppy_size = st.st_size;
-
-    int prot = g_unix_floppy_writeable ? (PROT_READ | PROT_WRITE) : PROT_READ;
-    int flag = g_unix_floppy_writeable ? MAP_SHARED : MAP_PRIVATE;
-
-    g_unix_floppy_image = (uint8_t *)mmap(NULL, g_unix_floppy_size,
-                                          prot, flag, fd, 0);
-    if (g_unix_floppy_image == MAP_FAILED) {
-        perror("mmap unix floppy");
-        g_unix_floppy_image = NULL;
-        g_unix_floppy_size = 0;
-        close(fd);
-        return;
-    }
-
-    close(fd);
-
-#endif
-
-    fprintf(stderr,
-            "[UNIX-FLOPPY] %s: %zu bytes, %zu x %d-byte blocks (%s)\n",
-            path,
-            g_unix_floppy_size,
-            g_unix_floppy_size / SCSI_BLOCK_SIZE,
-            SCSI_BLOCK_SIZE,
-            g_unix_floppy_writeable ? "writes persist to file" : "read-only");
-}
 
 
 
@@ -1849,6 +1875,9 @@ static int scsi_cdb_length(uint8_t op) {
  * READY / others). */
 static void scsi_dispatch_cdb(void) {
     uint8_t op = g_ncr.cmd_bytes[0];
+    g_activity_target = -1;
+    g_activity_kind = DISK_ACTIVITY_IDLE;
+    g_activity_started = 0;
 
     /*if (TRACE_SCSI){
         fprintf(stderr,
@@ -2078,17 +2107,20 @@ static void scsi_dispatch_cdb(void) {
     }*/
     
 
+    if (floppy_media_cdb(target, unit, op)) goto scsi_media_finish;
+
     if (op == 0x00) {                 /* TEST UNIT READY */
         g_ncr.status_byte = img ? 0x00 : 0x02;
     }
     else if (op == 0x12) {            /* INQUIRY */
         memset(g_ncr.inquiry_buf, 0, sizeof(g_ncr.inquiry_buf));
-        if (!img) {
+        if (!img && !(target == 0 && unit == 2)) {
             /* absent unit: peripheral qualifier 011b + type 1Fh */
             g_ncr.inquiry_buf[0] = 0x7F;
             g_ncr.inquiry_buf[4] = 31;
         } else {
             g_ncr.inquiry_buf[0] = 0x00;  /* direct-access device */
+            if (target == 0 && unit == 2) g_ncr.inquiry_buf[1] = 0x80; /* removable */
             g_ncr.inquiry_buf[2] = 0x01;  /* ANSI SCSI-1 */
             g_ncr.inquiry_buf[3] = 0x01;  /* response data format */
             g_ncr.inquiry_buf[4] = 31;    /* additional length */
@@ -2464,6 +2496,8 @@ static void scsi_dispatch_cdb(void) {
          * a minimal 4-byte mode parameter header + the requested page. */
         static uint8_t modesense[36];
         memset(modesense, 0, sizeof(modesense));
+        if (target == 0 && unit == 2 && !g_unix_floppy_writeable)
+            modesense[2] = 0x80; /* write-protected medium */
         modesense[0] = 35;              /* mode data length (total - 1) */
         modesense[4] = g_ncr.cmd_bytes[2] & 0x3F;  /* echo the page code */
         modesense[5] = 30;              /* page length */
@@ -2519,6 +2553,18 @@ static void scsi_dispatch_cdb(void) {
         g_ncr.status_byte = 0x02;       /* unsupported / absent → CHECK CONDITION */
     }
 
+scsi_media_finish:
+    /* Attribute data to the resolved backing image, including key redirects.
+     * Polling, sense, capacity and mode-page responses are not disk activity. */
+    if (img && g_ncr.status_byte == 0 && g_ncr.data_len > 0 &&
+        (op == 0x08 || op == 0x28 || op == 0xC0 || op == 0x0A || op == 0x2A)) {
+        if (img == g_disk_image) g_activity_target = DISK_STATUS_MAIN;
+        else if (img == g_disk4_image) g_activity_target = DISK_STATUS_EXTRA;
+        else if (img == g_keydisk_image) g_activity_target = DISK_STATUS_KEY;
+        else if (img == g_unix_floppy_image) g_activity_target = DISK_STATUS_UNIX;
+        g_activity_kind = (op == 0x0A || op == 0x2A)
+            ? DISK_ACTIVITY_WRITE : DISK_ACTIVITY_READ;
+    }
     if (g_ncr.data_len > 0 && (op == 0x0A || op == 0x2A)) {
         g_ncr.phase = PHASE_DATA_OUT;    /* WRITE: host -> disk image */
         g_ncr.req_target = 1;
@@ -2553,6 +2599,7 @@ static void ncr_advance_phase(void) {
          * WRITE streaming straight into the disk image (data_buf points
          * into the image for op $0A/$2A). */
         if (g_ncr.data_len > 0) {
+            ncr_activity_transfer();
             *g_ncr.data_buf++ = g_ncr.odata;
             g_ncr.data_len--;
         }
@@ -2670,6 +2717,7 @@ static void ncr_advance_phase(void) {
 	
 	case PHASE_DATA_IN:
         if (g_ncr.data_len > 0) {
+            ncr_activity_transfer();
             g_ncr.data_buf++;
             g_ncr.data_len--;
         }
@@ -4678,6 +4726,11 @@ int main(int argc, char **argv) {
 #ifdef USE_SDL
     if (use_sdl) {
         if (sdl_init(scale) < 0) return 1;
+        /* A manager failure should not prevent using the Torch. */
+        disk_manager_init();
+        disk_manager_place_beside(g_win);
+        /* Start with the disk manager hidden; F12 toggles its visibility. */
+        disk_manager_toggle();
     }
 #else
     (void)use_sdl; (void)scale;
@@ -4701,6 +4754,7 @@ int main(int argc, char **argv) {
     long steps_since_frame = 0;
     long shot_ctr = 0;
     for (steps = 0; running && (max_steps == 0 || steps < max_steps); steps++) {
+        ncr_floppy_service();
         if (!cpu_step()) break;
         /* Watch for the SP entering its cmd $0B handler at $C9F5, which
          * is reached only when the kernel writes 0x0B to the host->SP
@@ -4920,7 +4974,38 @@ int main(int argc, char **argv) {
             int mdx = 0, mdy = 0;
             int cur_left = 0, cur_right = 0;
             SDL_Event ev;
+            static Uint8 torch_keys[SDL_NUM_SCANCODES];
+            disk_manager_input_begin();
             while (SDL_PollEvent(&ev)) {
+                if ((ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) &&
+                    ev.key.keysym.sym == SDLK_F12) {
+                    if (ev.type == SDL_KEYDOWN && !ev.key.repeat)
+                        disk_manager_toggle();
+                    continue;
+                }
+                if (disk_manager_event(&ev)) continue;
+                if (ev.type == SDL_WINDOWEVENT &&
+                    ev.window.windowID == SDL_GetWindowID(g_win)) {
+                    if (ev.window.event == SDL_WINDOWEVENT_CLOSE) running = 0;
+                    if (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                        /* Release held keys/buttons when switching windows. */
+                        for (int k = 0; k < SDL_NUM_SCANCODES; ++k) {
+                            if (torch_keys[k]) {
+                                uint8_t mc = torch_keys[k];
+                                if (mc) sci_enqueue(mc | 0x80);
+                                torch_keys[k] = 0;
+                            }
+                        }
+                        mouse_packet(0, 0, 0, 0);
+                        mdx = mdy = cur_left = cur_right = 0;
+                    }
+                    continue;
+                }
+                if (ev.type == SDL_KEYDOWN && ev.key.windowID != SDL_GetWindowID(g_win)) continue;
+                if (ev.type == SDL_KEYUP && ev.key.windowID != SDL_GetWindowID(g_win)) continue;
+                if (ev.type == SDL_MOUSEMOTION && ev.motion.windowID != SDL_GetWindowID(g_win)) continue;
+                if ((ev.type == SDL_MOUSEBUTTONDOWN || ev.type == SDL_MOUSEBUTTONUP) &&
+                    ev.button.windowID != SDL_GetWindowID(g_win)) continue;
                 if (ev.type == SDL_QUIT) running = 0;
                 
                 else if (ev.type == SDL_KEYUP) {
@@ -4937,8 +5022,10 @@ int main(int argc, char **argv) {
 				uint8_t mc =
 					torch_matrix_code(ev.key.keysym.sym);
 
-				if (mc)
-					sci_enqueue(mc | 0x80);
+				if (mc) {
+                        sci_enqueue(mc | 0x80);
+                        torch_keys[ev.key.keysym.scancode] = 0;
+                    }
 			}
 
                 
@@ -5017,8 +5104,10 @@ int main(int argc, char **argv) {
 				uint8_t mc =
 					torch_matrix_code(ev.key.keysym.sym);
 
-				if (mc)
-					sci_enqueue(mc);
+				if (mc) {
+                    sci_enqueue(mc);
+                    torch_keys[ev.key.keysym.scancode] = mc;
+                }
 			}	
 							
                 else if (ev.type == SDL_MOUSEMOTION) {
@@ -5059,6 +5148,9 @@ int main(int argc, char **argv) {
                     }
                 }			
             }
+            disk_manager_input_end();
+            disk_manager_render();
+            SDL_ShowCursor(SDL_GetMouseFocus() == g_win ? SDL_DISABLE : SDL_ENABLE);
             /* Emit one motion packet at end of frame if there's residual
              * motion the button-flush did not already drain. */
             if (mdx || mdy) {
@@ -5138,7 +5230,17 @@ int main(int argc, char **argv) {
 #ifdef USE_SDL
     if (shot_path) dump_ppm(shot_path);
 #endif
+    ncr_floppy_shutdown();
     speaker_shutdown();
+#ifdef USE_SDL
+    if (use_sdl) {
+        disk_manager_shutdown();
+        SDL_DestroyTexture(g_tex);
+        SDL_DestroyRenderer(g_ren);
+        SDL_DestroyWindow(g_win);
+        SDL_Quit();
+    }
+#endif
     (void)verbose;
     return 0;
 }
